@@ -1,0 +1,3 @@
+[submodule "ModelLibrary"]
+	path = ModelLibrary
+	url = https://github.com/kazewong/ModelLibrary
