@@ -13,7 +13,9 @@ from data.GWdataset import GWdataset
 from torch.utils.data import DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
 import numpy as np
-from clearml import Task
+from clearml import Task, Logger
+
+
 
 argparser = argparse.ArgumentParser()
 
@@ -29,39 +31,35 @@ argparser.add_argument('--group_norm_size', type=int, default=32)
 argparser.add_argument("--sigma", type=float, default=25.0)
 
 # Training hyperparameters
-argparser.add_argument("--n_epochs", type=int, default=200)
-argparser.add_argument("--batch_size", type=int, default=256)
+argparser.add_argument("--n_epochs", type=int, default=50)
+argparser.add_argument("--batch_size", type=int, default=64)
 argparser.add_argument("--learning_rate", type=float, default=1e-4)
-argparser.add_argument("--print_every", type=int, default=4)
+argparser.add_argument("--log_epoch", type=int, default=2)
 argparser.add_argument("--seed", type=int, default=2019612721831)
-argparser.add_argument("--num_workers", type=int, default=4)
-
+argparser.add_argument("--num_workers", type=int, default=8)
 
 args = argparser.parse_args()
 
-
 initialize()
 n_processes = jax.process_count()
-
 if jax.process_index() == 0:
-    if args.experiment_name != 'None':
-        Task.init(project_name="DiffusionAstro", task_name=args.experiment_name)
-    else:
-        Task.init(project_name="DiffusionAstro")
+    Task.init(project_name="DiffusionAstro", task_name=args.experiment_name)
 
 
 class GWDiffusionTrainer:
 
     def __init__(self,
-                config: argparse.Namespace):
+                config: argparse.Namespace, logging: bool = False):
         self.config = config
-        Task.connect_configuration(configuration=config)
+        self.logging = logging
+        # if logging:
+        #     Task.connect_configuration(configuration=config)
 
         devices = np.array(jax.devices())
         self.global_mesh = jax.sharding.Mesh(devices, ('b'))
         self.sharding = jax.sharding.NamedSharding(self.global_mesh, jax.sharding.PartitionSpec(('b'),))
 
-        train_set, test_set = GWdataset(config.data_path)
+        train_set, test_set = random_split(GWdataset(config.data_path),[0.8,0.2])
         train_sampler = DistributedSampler(train_set,
                                            num_replicas=n_processes,
                                            rank=jax.process_index(),
@@ -83,12 +81,14 @@ class GWDiffusionTrainer:
                                         sampler=test_sampler,
                                         pin_memory=True)
 
-        self.optimizer = optax.adam(config.learning_rate)
+        self.data_shape = train_set.dataset.get_shape()
 
-        key, subkey = jax.random.split(jax.random.PRNGKey(config.seed))
-        unet = Unet(1, config.hidden_layer, config.autoencoder_embed_dim, subkey, config.group_norm_size)
-        key, subkey = jax.random.split(key)
-        time_embed = eqx.nn.Linear(config.time_feature, config.autoencoder_embed_dim, subkey)
+
+        self.key, subkey = jax.random.split(jax.random.PRNGKey(config.seed))
+        unet = Unet(1, config.hidden_layer, config.autoencoder_embed_dim, subkey, group_norm_size=config.group_norm_size)
+        self.key, subkey = jax.random.split(self.key)
+        time_embed = eqx.nn.Linear(config.time_feature, config.autoencoder_embed_dim, key=subkey)
+        self.key, subkey = jax.random.split(self.key)
         gaussian_feature = GaussianFourierFeatures(config.time_feature, subkey)
         self.model = ScordBasedSDE(unet,
                                     lambda x: 1,
@@ -98,14 +98,37 @@ class GWDiffusionTrainer:
                                     gaussian_feature,
                                     time_embed)
 
-        
+        self.optimizer = optax.adam(config.learning_rate)
+        self.opt_state = self.optimizer.init(eqx.filter(self.model, eqx.is_array))
 
     def train(self):
-        pass
+        if jax.process_index()==0: print("Start training")
+        max_loss = 1e10
+        self.best_model = self.model
+        for step in range(self.config.n_epochs):
+            if jax.process_index()==0: print("Epoch: ", step)
+            if step % self.config.log_epoch == 0:
+                self.key, subkey = jax.random.split(self.key)
+                self.model, self.opt_state, train_loss = self.train_epoch(self.model, self.opt_state, self.train_loader, subkey, step, log_loss=True)
+                self.key, subkey = jax.random.split(self.key)
+                test_loss = self.test_epoch(self.model, self.test_loader, subkey, step)
+
+                if max_loss > test_loss:
+                    max_loss = test_loss
+                    self.best_model = self.model
+                if self.logging:
+                    Logger.current_logger().report_scalar("Loss", "training_loss", value=train_loss, iteration=step)
+                    Logger.current_logger().report_scalar("Loss", "test_loss", value=test_loss, iteration=step)
+                    # best_model.save_model(mlflow.get_artifact_uri()[7:] + "/best_model")
+            else:
+                self.key, subkey = jax.random.split(self.key)
+                self.model, self.opt_state, train_loss = self.train_epoch(self.model, self.opt_state, self.train_loader, subkey, step, log_loss=False)
+
 
     def validate(self):
         pass
 
+    @staticmethod
     @eqx.filter_jit
     def train_step(
         model: ScordBasedSDE,
@@ -121,6 +144,7 @@ class GWDiffusionTrainer:
         model = eqx.apply_updates(model, updates)
         return model, opt_state, loss_values
 
+    @staticmethod
     @eqx.filter_jit
     def test_step(
         model: ScordBasedSDE,
@@ -143,71 +167,41 @@ class GWDiffusionTrainer:
         train_loss = 0
         for batch in trainloader:
             key, subkey = jax.random.split(key)
-            local_batch = jnp.array(batch[0])
-            global_shape = (jax.process_count() * local_batch.shape[0], ) + (1,28,28)
+            local_batch = jnp.array(batch)
+            global_shape = (jax.process_count() * local_batch.shape[0], ) + (1,) + self.data_shape
 
-            arrays = jax.device_put(jnp.split(local_batch, len(global_mesh.local_devices), axis = 0), global_mesh.local_devices)
-            global_batch = jax.make_array_from_single_device_arrays(global_shape, sharding, arrays)
-            model, opt_state, loss_values = self.train_step(model, opt_state, global_batch, subkey, optimizer.update)
+            arrays = jax.device_put(jnp.split(local_batch, len(self.global_mesh.local_devices), axis = 0), self.global_mesh.local_devices)
+            global_batch = jax.make_array_from_single_device_arrays(global_shape, self.sharding, arrays)
+            model, opt_state, loss_values = self.train_step(model, opt_state, global_batch, subkey, self.optimizer.update)
             if log_loss: train_loss += jnp.sum(process_allgather(loss_values))
             train_loss = train_loss/ jax.process_count()
             return model, opt_state, train_loss
 
-    def train(
-    model: ScordBasedSDE,
-    trainloader: DataLoader,
-    testloader: DataLoader,
-    key: PRNGKeyArray,
-    steps: int = 1000,
-    print_every: int = 100,
-):
-
-
-
-
-    def test_epoch(
+    def test_epoch(self,
         model: ScordBasedSDE,
         testloader: DataLoader,
         key: PRNGKeyArray,
         epoch: int,
     ):
         test_loss = 0
-        test_sampler.set_epoch(epoch)
+        self.test_loader.sampler.set_epoch(epoch)
         for batch in testloader:
             key, subkey = jax.random.split(key)
-            local_batch = jnp.array(batch[0])
-            global_shape = (jax.process_count() * local_batch.shape[0], ) + (1,28,28)
+            local_batch = jnp.array(batch)
+            global_shape = (jax.process_count() * local_batch.shape[0], ) + (1,) + self.data_shape
 
-            arrays = jax.device_put(jnp.split(local_batch, len(global_mesh.local_devices), axis = 0), global_mesh.local_devices)
-            global_batch = jax.make_array_from_single_device_arrays(global_shape, sharding, arrays)
-            test_loss += jnp.sum(process_allgather(test_step(model, global_batch, subkey)))
+            arrays = jax.device_put(jnp.split(local_batch, len(self.global_mesh.local_devices), axis = 0), self.global_mesh.local_devices)
+            global_batch = jax.make_array_from_single_device_arrays(global_shape, self.sharding, arrays)
+            test_loss += jnp.sum(process_allgather(self.test_step(model, global_batch, subkey)))
         test_loss_values = test_loss/ jax.process_count()
         return test_loss_values    
 
+if jax.process_index() == 0:
+    GWDiffusionTrainer(args, logging=True).train()
+else:
+    GWDiffusionTrainer(args, logging=False).train()
 
+# trainer = GWDiffusionTrainer(args, logging=False)
+# for batch in trainer.train_loader:
+#     print(jax.process_index(), batch.shape)
     
-    devices = np.array(jax.devices())
-    global_mesh = jax.sharding.Mesh(devices, ('b'))
-    sharding = jax.sharding.NamedSharding(global_mesh, jax.sharding.PartitionSpec(('b'),))
-
-    max_loss = 1e10
-    best_model = model
-    for step in range(steps):
-        if step % print_every != 0:
-            key, subkey = jax.random.split(key)
-            model, opt_state, train_loss = train_epoch(model, opt_state, trainloader, subkey, step, log_loss=False)
-        if step % print_every == 0:
-            key, subkey = jax.random.split(key)
-            model, opt_state, train_loss = train_epoch(model, opt_state, trainloader, subkey, step, log_loss=True)
-            key, subkey = jax.random.split(key)
-            test_loss = test_epoch(model, testloader, subkey, step)
-
-            if max_loss > test_loss:
-                max_loss = test_loss
-                best_model = model
-            if jax.process_index() == 0:
-                mlflow.log_metric(key="training_loss", value=train_loss, step=step)
-                mlflow.log_metric(key="test_loss", value=test_loss, step=step)
-                best_model.save_model(mlflow.get_artifact_uri()[7:] + "/best_model")
-
-    return best_model, opt_state
