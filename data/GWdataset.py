@@ -17,3 +17,4 @@ class GWdataset(Dataset):
 
     def get_shape(self) -> tuple:
         return self.data.shape[1:]
+
