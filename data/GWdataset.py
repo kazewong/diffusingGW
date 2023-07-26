@@ -13,4 +13,7 @@ class GWdataset(Dataset):
         sample = self.data[idx]
         if self.transform:
             sample = self.transform(sample)
-        return sample
+        return sample[:,None]
+
+    def get_shape(self) -> tuple:
+        return self.data.shape[1:]
