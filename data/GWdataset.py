@@ -2,7 +2,7 @@ from torch.utils.data import Dataset, DataLoader
 import h5py
 
 class GWdataset(Dataset):
-    def __init__(self, path, transform=None):
+    def __init__(self, path, transform=lambda x: x*1e20):
         self.data = h5py.File(path, 'r')['data']
         self.transform = transform
 

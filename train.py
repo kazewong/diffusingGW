@@ -31,8 +31,8 @@ argparser.add_argument('--group_norm_size', type=int, default=32)
 argparser.add_argument("--sigma", type=float, default=25.0)
 
 # Training hyperparameters
-argparser.add_argument("--n_epochs", type=int, default=50)
-argparser.add_argument("--batch_size", type=int, default=64)
+argparser.add_argument("--n_epochs", type=int, default=500)
+argparser.add_argument("--batch_size", type=int, default=128)
 argparser.add_argument("--learning_rate", type=float, default=1e-4)
 argparser.add_argument("--log_epoch", type=int, default=2)
 argparser.add_argument("--seed", type=int, default=2019612721831)
@@ -119,7 +119,8 @@ class GWDiffusionTrainer:
                 if self.logging:
                     Logger.current_logger().report_scalar("Loss", "training_loss", value=train_loss, iteration=step)
                     Logger.current_logger().report_scalar("Loss", "test_loss", value=test_loss, iteration=step)
-                    # best_model.save_model(mlflow.get_artifact_uri()[7:] + "/best_model")
+                    self.best_model.save_model("./best_model")
+                    Task.current_task().upload_artifact(artifact_object="./best_model", name="model")
             else:
                 self.key, subkey = jax.random.split(self.key)
                 self.model, self.opt_state, train_loss = self.train_epoch(self.model, self.opt_state, self.train_loader, subkey, step, log_loss=False)
@@ -201,7 +202,3 @@ if jax.process_index() == 0:
 else:
     GWDiffusionTrainer(args, logging=False).train()
 
-# trainer = GWDiffusionTrainer(args, logging=False)
-# for batch in trainer.train_loader:
-#     print(jax.process_index(), batch.shape)
-    
