@@ -16,5 +16,5 @@ class GWdataset(Dataset):
         return sample[None,:]
 
     def get_shape(self) -> tuple:
-        return self.data.shape[1:]
+        return (1,)+self.data.shape[1:]
 
