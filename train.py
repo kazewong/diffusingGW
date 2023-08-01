@@ -37,8 +37,6 @@ class SDEDiffusionParser(Tap):
     seed: int = 2019612721831
     num_workers: int = 8
 
-
-
 class SDEDiffusionTrainer:
 
     def __init__(self,
@@ -191,18 +189,18 @@ class SDEDiffusionTrainer:
         test_loss_values = test_loss/ jax.process_count() / len(testloader) /np.sum(self.data_shape)
         return test_loss_values
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
 
-    args = SDEDiffusionParser().parse_args()
+args = SDEDiffusionParser().parse_args()
 
-    if args.distributed == True:
-        initialize()
-        print(jax.process_count())
+if args.distributed == True:
+    initialize()
+    print(jax.process_count())
 
-    n_processes = jax.process_count()
-    if jax.process_index() == 0:
-        trainer = SDEDiffusionTrainer(args, logging=True)
-        trainer.train()
-    else:
-        trainer = SDEDiffusionTrainer(args, logging=False)
-        trainer.train()
+n_processes = jax.process_count()
+if jax.process_index() == 0:
+    trainer = SDEDiffusionTrainer(args, logging=True)
+    trainer.train()
+else:
+    trainer = SDEDiffusionTrainer(args, logging=False)
+    trainer.train()
