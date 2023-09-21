@@ -6,7 +6,7 @@ import os
 from tqdm.notebook import tqdm 
 from glob import glob
 import requests
-from multiprocess import Pool
+from multiprocessing import Pool
 import time
 
 
@@ -73,5 +73,9 @@ if __name__=='__main__':
         
     result = np.concatenate(result)
     print("Time taken: ", time.time() - current_time)
+    scale = np.mean(np.abs(result[::1000]))
+    std = np.std(result[::1000])
     with h5py.File('/mnt/home/wwong/ceph/Dataset/GW/DiffusionLikelihood/O1/H1_processed.hdf5', 'w') as f:
         f.create_dataset('data', data=result)
+        f.attrs['scale'] = scale
+        f.attrs['std'] = std

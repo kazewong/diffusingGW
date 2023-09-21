@@ -1,7 +1,7 @@
-from torch.utils.data import Dataset, DataLoader
+from kazeML.jax.diffusion.diffusion_dataset import DiffusionDataset
 import h5py
 
-class GWdataset(Dataset):
+class GWdataset(DiffusionDataset):
     def __init__(self, path, transform=lambda x: x*1e20):
         self.data = h5py.File(path, 'r')['data']
         self.transform = transform
@@ -14,7 +14,3 @@ class GWdataset(Dataset):
         if self.transform:
             sample = self.transform(sample)
         return sample[None,:]
-
-    def get_shape(self) -> tuple:
-        return (1,)+self.data.shape[1:]
-
