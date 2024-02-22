@@ -1,1 +1,3 @@
 *.eqx
+data/diffusingGW
+experiment/args.json
