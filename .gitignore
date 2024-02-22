@@ -1,3 +1,5 @@
 *.eqx
 data/diffusingGW
 experiment/args.json
+diffusingGW.code-workspace
+wandb
